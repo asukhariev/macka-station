@@ -448,7 +448,8 @@ class Handler(BaseHTTPRequestHandler):
 
                         # Emergency crossfade: mindfulness activated mid-track
                         if serve_path != MINDFULNESS and station.is_mindfulness() and cf_bytes is None:
-                            pos_sec = max(0.0, (pos - offset) / bytes_sec)
+                            station.advance(hi_path)   # advance to mindfulness
+                            pos_sec   = max(0.0, (pos - offset) / bytes_sec)
                             cf_bytes  = make_crossfade(
                                 serve_path, MINDFULNESS,
                                 bitrate_kbps=128 if lo else 320,
@@ -459,8 +460,10 @@ class Handler(BaseHTTPRequestHandler):
                             chunk     = b''
                             break
 
-                        # Normal / mindfulness crossfade at end of track
+                        # Crossfade at end of track: advance station first, then
+                        # snapshot gives us the NEW track as crossfade target
                         if pos >= cf_byte and cf_bytes is None:
+                            station.advance(hi_path)   # ← advance before snapshot
                             snap2   = station.snapshot()
                             nxt_hi  = snap2['path']
                             nxt_srv = station.lo_serve_path(lo)
@@ -487,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
                 if cf_bytes:
                     self.wfile.write(cf_bytes)
 
-                station.advance(hi_path)
+                # Track already advanced above; just update local vars
                 hi_path    = nxt_hi or station.snapshot()['path']
                 serve_path = station.lo_serve_path(lo)
                 dur, bitrate = ffprobe_info(serve_path)
