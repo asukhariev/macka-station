@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="6" fill="#03070f"/>
+  <g>
+    <animateTransform attributeName="transform" type="rotate"
+      from="0 16 16" to="360 16 16" dur="4s" repeatCount="indefinite"/>
+    <!-- record body -->
+    <circle cx="16" cy="16" r="13" fill="#2a5fc8"/>
+    <!-- grooves -->
+    <circle cx="16" cy="16" r="11" fill="none" stroke="#3a6fa8" stroke-width="0.6" opacity="0.5"/>
+    <circle cx="16" cy="16" r="9"  fill="none" stroke="#3a6fa8" stroke-width="0.6" opacity="0.5"/>
+    <circle cx="16" cy="16" r="7"  fill="none" stroke="#3a6fa8" stroke-width="0.6" opacity="0.5"/>
+    <!-- label -->
+    <circle cx="16" cy="16" r="4.5" fill="#eef5ff"/>
+    <!-- center hole -->
+    <circle cx="16" cy="16" r="1.2" fill="#2a5fc8"/>
+  </g>
+</svg>

@@ -19,17 +19,40 @@ canvas {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 2.5rem 3rem;
 }
 
-#top {
-  pointer-events: all;
+/* top-right: quality + theme toggles */
+#top-right {
+  position: absolute;
+  top: 2.5rem;
+  right: 3rem;
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
+  gap: 1.5rem;
+  align-items: center;
+  pointer-events: all;
+}
+
+/* play — centered, above Macka Funk (top set via inline style from canvas bounds) */
+.play-btn {
+  position: absolute;
+  left: 50%;
+  top: 32%;
+  transform: translateX(-50%);
+  pointer-events: all;
+  font-size: 1rem;
+  letter-spacing: .3em;
+}
+
+/* track info — centered, below Macka Funk (top set via inline style) */
+#bottom-center {
+  position: absolute;
+  left: 50%;
+  top: 68%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .4rem;
 }
 
 .ctrl-btn {
@@ -46,21 +69,21 @@ canvas {
 }
 .ctrl-btn:hover { color: #7ab4e8; }
 
-.theme-btn {
-  font-size: 1rem;
-  color: #5090c8;
-}
+.theme-btn       { font-size: 1rem; color: #5090c8; }
 .theme-btn:hover { color: #7ab4e8; }
 
-body.light .ctrl-btn { color: #2060b0; }
-body.light .ctrl-btn:hover { color: #1040a0; }
-body.light .theme-btn { color: #6090c0; }
+body.light .ctrl-btn        { color: #2060b0; }
+body.light .ctrl-btn:hover  { color: #1040a0; }
+body.light .theme-btn       { color: #6090c0; }
 body.light .theme-btn:hover { color: #2060b0; }
 
-#bottom {
-  display: flex;
-  flex-direction: column;
-  gap: .4rem;
+#cover-art {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  opacity: .85;
+  margin-bottom: .2rem;
 }
 
 #track {
@@ -72,10 +95,12 @@ body.light .theme-btn:hover { color: #2060b0; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 80vw;
+  text-align: center;
 }
 #track.live { color: #5090c0; }
 
-body.light #track { color: #3070b0; }
+body.light #track      { color: #3070b0; }
 body.light #track.live { color: #1050a0; }
 
 #status {
@@ -83,5 +108,6 @@ body.light #track.live { color: #1050a0; }
   font-size: .65rem;
   letter-spacing: .2em;
   color: #1a3050;
+  text-align: center;
 }
 body.light #status { color: #80a0c0; }
