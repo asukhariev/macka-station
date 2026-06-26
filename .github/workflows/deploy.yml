@@ -12,7 +12,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Copy server files to VPS
+      # 1. Signal running radio to enter mindfulness — stream stays up
+      - name: Enter mindfulness mode
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: macka.agtc.app
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            PID=$(systemctl show -p MainPID macka-radio --value 2>/dev/null || echo "")
+            if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+              kill -USR1 "$PID" && echo "→ mindfulness signal sent to PID $PID"
+            fi
+
+      # 2. Copy new server files while mindfulness is playing
+      - name: Deploy server files
         uses: appleboy/scp-action@v0.1.7
         with:
           host: macka.agtc.app
@@ -22,7 +36,9 @@ jobs:
           target: "/srv/macka/"
           strip_components: 1
 
-      - name: Install deps & restart service
+      # 3. Touch deploy trigger + restart — new process starts in mindfulness,
+      #    crossfades back to music after MINDFULNESS_SECS automatically
+      - name: Restart with deploy trigger
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: macka.agtc.app
@@ -30,6 +46,8 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             pip3 install -r /srv/macka/requirements.txt -q
+            touch /tmp/macka_deploy
             systemctl restart macka-radio
-            sleep 2
+            sleep 3
             systemctl is-active macka-radio
+            curl -sf https://macka.agtc.app/now && echo " ✓ /now ok"
