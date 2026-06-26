@@ -214,23 +214,107 @@ def lo_path(hi_path):
 # ---------- station ----------------------------------------------------------
 
 class Station:
+    """
+    Shared broadcast state — all listeners hear the same track at the same position.
+    """
     def __init__(self):
-        self._lock            = threading.Lock()
-        self._mindfulness     = False
+        self._lock              = threading.Lock()
+        self._path              = None      # current hi-res track path
+        self._dur               = None
+        self._bitrate           = 320_000
+        self._started           = time.monotonic()
+        self.current            = '—'
+        self.has_cover          = False
+        self._mindfulness       = False
         self._mindfulness_until = 0.0
-        self.current          = '—'
-        self.has_cover        = False
+
+    # ── shared broadcast ──────────────────────────────────────────────────────
+
+    def _switch(self, path: str):
+        """Must be called with lock held."""
+        dur, br = ffprobe_info(path)
+        self._path     = path
+        self._dur      = dur
+        self._bitrate  = br
+        self._started  = time.monotonic()
+        # Update display info
+        if path == MINDFULNESS:
+            self.current   = '· · ·'
+            self.has_cover = False
+        else:
+            title, artist = probe_tags(path)
+            self.current   = f'{artist} – {title}' if artist and title else (title or os.path.splitext(os.path.basename(path))[0])
+            self.has_cover = bool(extract_cover(path))
+        print(f'NOW  {self.current}  [{br//1000}kbps]', flush=True)
+
+    def snapshot(self):
+        with self._lock:
+            elapsed = time.monotonic() - self._started
+            return dict(
+                path     = self._path,
+                bitrate  = self._bitrate,
+                dur      = self._dur,
+                offset   = max(0, int(elapsed * self._bitrate / 8) - CHUNK),
+                elapsed  = elapsed,
+            )
+
+    def advance(self, from_path: str):
+        """Move to next track if we're still on from_path."""
+        with self._lock:
+            if self._path != from_path:
+                return
+            if self._mindfulness and time.monotonic() < self._mindfulness_until:
+                next_path = MINDFULNESS
+            else:
+                self._mindfulness = False
+                fn = next_track_filename()
+                next_path = os.path.join(AUDIO_DIR, fn)
+            self._switch(next_path)
+
+    def run(self):
+        """Advance tracks based on timing; also drives /now updates."""
+        # Pick first track
+        with self._lock:
+            if self._mindfulness and time.monotonic() < self._mindfulness_until:
+                self._switch(MINDFULNESS)
+            else:
+                fn = next_track_filename()
+                self._switch(os.path.join(AUDIO_DIR, fn))
+
+        while True:
+            time.sleep(1)
+            with self._lock:
+                # Tick mindfulness timeout
+                if self._mindfulness and time.monotonic() >= self._mindfulness_until:
+                    self._mindfulness = False
+
+                if not self._path or not self._dur:
+                    continue
+                elapsed = time.monotonic() - self._started
+                if elapsed >= self._dur - 0.5:
+                    if self._mindfulness and time.monotonic() < self._mindfulness_until:
+                        self._switch(MINDFULNESS)
+                    else:
+                        self._mindfulness = False
+                        fn = next_track_filename()
+                        self._switch(os.path.join(AUDIO_DIR, fn))
+
+    # ── mindfulness ───────────────────────────────────────────────────────────
 
     def enter_mindfulness(self, secs=MINDFULNESS_SECS):
         with self._lock:
             self._mindfulness       = True
             self._mindfulness_until = time.monotonic() + secs
+            # Force early crossfade by pretending the track ends soon
+            if self._dur:
+                elapsed = time.monotonic() - self._started
+                self._dur = elapsed + CROSSFADE + 0.5
         print(f'→ mindfulness mode ({secs}s)', flush=True)
 
     def exit_mindfulness(self):
         with self._lock:
             self._mindfulness = False
-        print('← exiting mindfulness', flush=True)
+        print('← exiting mindfulness early', flush=True)
 
     def is_mindfulness(self) -> bool:
         with self._lock:
@@ -238,20 +322,17 @@ class Station:
                 return False
             if time.monotonic() >= self._mindfulness_until:
                 self._mindfulness = False
-                print('← mindfulness timeout', flush=True)
                 return False
             return True
 
-    def set_now(self, title: str, cover: bool):
+    def lo_serve_path(self, lo: bool) -> str:
         with self._lock:
-            self.current   = title
-            self.has_cover = cover
-
-    def run(self):
-        """Background loop: only needed to update /now display from outside _serve."""
-        while True:
-            time.sleep(1)
-            self.is_mindfulness()  # tick timeout check
+            path = self._path
+        if not path:
+            return path
+        if path == MINDFULNESS or not lo:
+            return path
+        return lo_path(path)
 
 station = Station()
 
@@ -307,15 +388,20 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         elif path == '/cover':
-            snap_path = None
-            with station._lock:
-                if not station._mindfulness:
-                    # we don't have a direct path ref on station anymore — /cover is best-effort
-                    pass
-            # Extract cover from current track (station doesn't track path directly;
-            # cover requests come from browser which knows current track changed)
-            self.send_response(404)
-            self.end_headers()
+            snap = station.snapshot()
+            data = extract_cover(snap['path']) if snap['path'] and snap['path'] != MINDFULNESS else None
+            if data:
+                self.send_response(200)
+                mime = 'image/png' if data[:4] == b'\x89PNG' else 'image/jpeg'
+                self.send_header('Content-Type', mime)
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self.send_response(404)
+                self.end_headers()
 
         elif path in ('/stream', '/stream-lo'):
             self._serve(lo=(path == '/stream-lo'))
@@ -334,23 +420,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         try:
-            # Determine first file
-            in_mindful  = station.is_mindfulness()
-            serve_path  = MINDFULNESS if in_mindful else self._next(lo)
-            dur, bitrate = ffprobe_info(serve_path)
-            offset      = 0
+            snap       = station.snapshot()
+            hi_path    = snap['path']
+            serve_path = station.lo_serve_path(lo)
+            bitrate    = snap['bitrate']
+            dur        = snap['dur']
+            offset     = snap['offset']
             cf_cache: dict = {}
 
             while True:
-                bytes_sec  = (bitrate or 320_000) / 8
-                burst_b    = int(BURST_SECS * bytes_sec)
-                file_size  = os.path.getsize(serve_path)
-                cf_byte    = int((dur - CROSSFADE) * bytes_sec) if dur else file_size
-                sent       = 0
-                deadline   = time.monotonic()
-                cf_bytes   = None
-                next_path  = None
-                emergency  = False  # mid-track mindfulness crossfade
+                bytes_sec = (bitrate or 320_000) / 8
+                burst_b   = int(BURST_SECS * bytes_sec)
+                cf_byte   = int((dur - CROSSFADE) * bytes_sec) if dur else os.path.getsize(serve_path)
+                sent      = 0
+                deadline  = time.monotonic()
+                cf_bytes  = None
+                nxt_hi    = None
+                emergency = False
 
                 with open(serve_path, 'rb') as f:
                     f.seek(offset)
@@ -360,50 +446,32 @@ class Handler(BaseHTTPRequestHandler):
                         if not chunk:
                             break
 
-                        # ── emergency crossfade: mindfulness activated mid-track ──
-                        now_mindful = station.is_mindfulness()
-                        if not in_mindful and now_mindful and cf_bytes is None:
-                            pos_sec = (pos - offset) / bytes_sec
-                            cf_bytes = make_crossfade(
+                        # Emergency crossfade: mindfulness activated mid-track
+                        if serve_path != MINDFULNESS and station.is_mindfulness() and cf_bytes is None:
+                            pos_sec = max(0.0, (pos - offset) / bytes_sec)
+                            cf_bytes  = make_crossfade(
                                 serve_path, MINDFULNESS,
                                 bitrate_kbps=128 if lo else 320,
-                                offset_a_sec=pos_sec if dur and pos_sec < dur - CROSSFADE else None
+                                offset_a_sec=pos_sec if dur and pos_sec < dur - CROSSFADE else None,
                             )
-                            next_path = MINDFULNESS
+                            nxt_hi    = MINDFULNESS
                             emergency = True
-                            chunk = b''
+                            chunk     = b''
                             break
 
-                        # ── exit mindfulness crossfade: at natural boundary ──
-                        if in_mindful and not now_mindful and pos >= cf_byte and cf_bytes is None:
-                            next_path = self._next(lo)
-                            cf_bytes  = make_crossfade(serve_path, next_path,
-                                                       bitrate_kbps=128 if lo else 320)
-                            chunk = chunk[:max(0, cf_byte - pos)]
-                            if not chunk:
-                                break
-
-                        # ── normal crossfade at end of track ──
-                        elif not in_mindful and pos >= cf_byte and cf_bytes is None:
-                            if station.is_mindfulness():
-                                next_path = MINDFULNESS
-                            else:
-                                next_path = self._next(lo)
-                            cf_bytes = make_crossfade(serve_path, next_path,
-                                                      bitrate_kbps=128 if lo else 320)
-                            chunk = chunk[:max(0, cf_byte - pos)]
-                            if not chunk:
-                                break
-
-                        # ── mindfulness loop crossfade ──
-                        elif in_mindful and pos >= cf_byte and cf_bytes is None:
-                            if station.is_mindfulness():
-                                next_path = MINDFULNESS  # keep looping
-                            else:
-                                next_path = self._next(lo)
-                            cf_bytes = make_crossfade(serve_path, next_path,
-                                                      bitrate_kbps=128 if lo else 320)
-                            chunk = chunk[:max(0, cf_byte - pos)]
+                        # Normal / mindfulness crossfade at end of track
+                        if pos >= cf_byte and cf_bytes is None:
+                            snap2   = station.snapshot()
+                            nxt_hi  = snap2['path']
+                            nxt_srv = station.lo_serve_path(lo)
+                            key     = (serve_path, nxt_srv)
+                            if key not in cf_cache:
+                                cf_cache[key] = make_crossfade(
+                                    serve_path, nxt_srv,
+                                    bitrate_kbps=128 if lo else 320,
+                                )
+                            cf_bytes = cf_cache[key]
+                            chunk    = chunk[:max(0, cf_byte - pos)]
                             if not chunk:
                                 break
 
@@ -419,30 +487,14 @@ class Handler(BaseHTTPRequestHandler):
                 if cf_bytes:
                     self.wfile.write(cf_bytes)
 
-                # Advance
-                in_mindful  = (next_path == MINDFULNESS) if next_path else in_mindful
-                serve_path  = next_path or serve_path
+                station.advance(hi_path)
+                hi_path    = nxt_hi or station.snapshot()['path']
+                serve_path = station.lo_serve_path(lo)
                 dur, bitrate = ffprobe_info(serve_path)
-                offset      = int(CROSSFADE * bitrate / 8) if cf_bytes and not emergency else 0
-
-                # Update /now display
-                if not in_mindful:
-                    title, artist = probe_tags(serve_path)
-                    display = f'{artist} – {title}' if artist and title else title
-                    cover   = bool(extract_cover(serve_path))
-                    station.set_now(display, cover)
-                    print(f'NOW  {display}  cover={cover}', flush=True)
-                else:
-                    station.set_now('· · ·', False)
+                offset     = int(CROSSFADE * (bitrate / 8)) if cf_bytes and not emergency else 0
 
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
-
-    def _next(self, lo: bool) -> str:
-        """Pick next track path (hi or lo)."""
-        fn = next_track_filename()
-        hi = os.path.join(AUDIO_DIR, fn)
-        return lo_path(hi) if lo else hi
 
 
 class Server(ThreadingMixIn, HTTPServer):
