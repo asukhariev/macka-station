@@ -2,3 +2,8 @@ node_modules/
 .next/
 out/
 .env*.local
+.vercel
+__pycache__/
+*.tsbuildinfo
+.claude/
+desktop/dist/

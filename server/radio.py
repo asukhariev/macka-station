@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Macka Station Radio v3
+Macka Station Radio v4
+- ONE encoder per bitrate → shared in-memory ring buffer → fan-out to all listeners.
+  Crossfade / ffprobe / disk reads / pacing happen ONCE, not once-per-listener.
+  Listener cost is now just a socket write, so the ceiling is bandwidth, not CPU.
 - PostgreSQL cycle-based smart shuffle (every track plays once per cycle)
 - /cover endpoint — streams embedded album art from ID3 tags
 - /now returns track title + has_cover flag
@@ -9,6 +12,7 @@ Macka Station Radio v3
 - Zero-downtime deploys via SIGUSR1 → mindfulness interlude
 """
 import os, time, threading, subprocess, json, hashlib, signal, sys
+from collections import deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -211,93 +215,108 @@ def lo_path(hi_path):
     lo   = os.path.join(AUDIO_LO_DIR, name)
     return lo if os.path.exists(lo) else hi_path
 
-# ---------- station ----------------------------------------------------------
+# ---------- shared playlist --------------------------------------------------
 
-class Station:
+class Playlist:
     """
-    Shared broadcast state — all listeners hear the same track at the same position.
+    Single ordered sequence of upcoming track paths, shared by both encoders so
+    /stream and /stream-lo always walk the SAME tracks in the SAME order.
+    Each encoder holds its own integer cursor; entries are produced on demand.
     """
     def __init__(self):
+        self._paths: list[str] = []   # paths[seq - base]
+        self._base = 0
+        self._lock = threading.Lock()
+
+    def at(self, seq: int) -> str:
+        with self._lock:
+            while seq >= self._base + len(self._paths):
+                fn = next_track_filename()
+                self._paths.append(os.path.join(AUDIO_DIR, fn))
+            # bound memory; encoders stay within ~1 of each other so trimming
+            # 200 behind the leader never strands a live cursor
+            if len(self._paths) > 300:
+                cut = 200
+                self._paths = self._paths[cut:]
+                self._base += cut
+            return self._paths[seq - self._base]
+
+playlist = Playlist()
+
+# ---------- shared broadcast buffer ------------------------------------------
+
+class Broadcast:
+    """
+    One ring buffer per bitrate. The encoder pushes encoded chunks; every
+    listener tails the same buffer. New listeners get the recent backlog (burst)
+    for an instant start, then follow live. Listeners that fall behind the
+    window resync to live (a radio drop, never a stall on the producer).
+    """
+    def __init__(self, burst_chunks: int):
+        self._cond = threading.Condition()
+        self._buf: deque[bytes] = deque(maxlen=burst_chunks)
+        self._seq = 0   # total chunks ever pushed
+
+    def push(self, data: bytes):
+        if not data:
+            return
+        with self._cond:
+            self._buf.append(data)
+            self._seq += 1
+            self._cond.notify_all()
+
+    def stream(self):
+        """Generator: yield burst backlog, then live chunks forever."""
+        with self._cond:
+            backlog = list(self._buf)
+            want = self._seq            # next chunk index after the backlog
+        for c in backlog:
+            yield c
+        while True:
+            with self._cond:
+                while self._seq <= want:
+                    self._cond.wait()
+                oldest = self._seq - len(self._buf)
+                if want < oldest:       # fell behind the window → skip to live
+                    want = oldest
+                new = list(self._buf)[want - oldest:]
+                want = self._seq
+            for c in new:
+                yield c
+
+# ~8s of burst backlog per bitrate (chunks = bitrate / CHUNK)
+broadcast_hi = Broadcast(burst_chunks=12)
+broadcast_lo = Broadcast(burst_chunks=6)
+
+# ---------- station metadata + mindfulness -----------------------------------
+
+class Station:
+    """Holds 'what's playing' for /now + /cover, and the mindfulness flag."""
+    def __init__(self):
         self._lock              = threading.Lock()
-        self._path              = None      # current hi-res track path
-        self._dur               = None
-        self._bitrate           = 320_000
-        self._started           = time.monotonic()
         self.current            = '—'
         self.has_cover          = False
+        self._cur_path          = None
         self._mindfulness       = False
         self._mindfulness_until = 0.0
 
-    # ── shared broadcast ──────────────────────────────────────────────────────
-
-    def _switch(self, path: str):
-        """Must be called with lock held."""
-        dur, br = ffprobe_info(path)
-        self._path     = path
-        self._dur      = dur
-        self._bitrate  = br
-        self._started  = time.monotonic()
-        # Update display info
-        if path == MINDFULNESS:
-            self.current   = '· · ·'
-            self.has_cover = False
-        else:
-            title, artist = probe_tags(path)
-            self.current   = f'{artist} – {title}' if artist and title else (title or os.path.splitext(os.path.basename(path))[0])
-            self.has_cover = bool(extract_cover(path))
-        print(f'NOW  {self.current}  [{br//1000}kbps]', flush=True)
-
-    def snapshot(self):
+    def note_now(self, path: str):
+        """Called by the master (hi) encoder when a new track starts playing."""
         with self._lock:
-            elapsed = time.monotonic() - self._started
-            return dict(
-                path     = self._path,
-                bitrate  = self._bitrate,
-                dur      = self._dur,
-                offset   = max(0, int(elapsed * self._bitrate / 8) - CHUNK),
-                elapsed  = elapsed,
-            )
-
-    def advance(self, from_path: str):
-        """Move to next track if we're still on from_path."""
-        with self._lock:
-            if self._path != from_path:
-                return
-            if self._mindfulness and time.monotonic() < self._mindfulness_until:
-                next_path = MINDFULNESS
+            self._cur_path = path
+            if path == MINDFULNESS:
+                self.current   = '· · ·'
+                self.has_cover = False
             else:
-                self._mindfulness = False
-                fn = next_track_filename()
-                next_path = os.path.join(AUDIO_DIR, fn)
-            self._switch(next_path)
+                title, artist = probe_tags(path)
+                self.current = (f'{artist} – {title}' if artist and title
+                                else (title or os.path.splitext(os.path.basename(path))[0]))
+                self.has_cover = bool(extract_cover(path))
+        print(f'NOW  {self.current}', flush=True)
 
-    def run(self):
-        """Advance tracks based on timing; also drives /now updates."""
-        # Pick first track
+    def cur_path(self):
         with self._lock:
-            if self._mindfulness and time.monotonic() < self._mindfulness_until:
-                self._switch(MINDFULNESS)
-            else:
-                fn = next_track_filename()
-                self._switch(os.path.join(AUDIO_DIR, fn))
-
-        while True:
-            time.sleep(1)
-            with self._lock:
-                # Tick mindfulness timeout
-                if self._mindfulness and time.monotonic() >= self._mindfulness_until:
-                    self._mindfulness = False
-
-                if not self._path or not self._dur:
-                    continue
-                elapsed = time.monotonic() - self._started
-                if elapsed >= self._dur - 0.5:
-                    if self._mindfulness and time.monotonic() < self._mindfulness_until:
-                        self._switch(MINDFULNESS)
-                    else:
-                        self._mindfulness = False
-                        fn = next_track_filename()
-                        self._switch(os.path.join(AUDIO_DIR, fn))
+            return self._cur_path
 
     # ── mindfulness ───────────────────────────────────────────────────────────
 
@@ -305,10 +324,6 @@ class Station:
         with self._lock:
             self._mindfulness       = True
             self._mindfulness_until = time.monotonic() + secs
-            # Force early crossfade by pretending the track ends soon
-            if self._dur:
-                elapsed = time.monotonic() - self._started
-                self._dur = elapsed + CROSSFADE + 0.5
         print(f'→ mindfulness mode ({secs}s)', flush=True)
 
     def exit_mindfulness(self):
@@ -325,16 +340,94 @@ class Station:
                 return False
             return True
 
-    def lo_serve_path(self, lo: bool) -> str:
-        with self._lock:
-            path = self._path
-        if not path:
-            return path
-        if path == MINDFULNESS or not lo:
-            return path
-        return lo_path(path)
-
 station = Station()
+
+# ---------- encoder (one per bitrate) ----------------------------------------
+
+class Encoder(threading.Thread):
+    """
+    Reads the shared playlist at real-time pace for one bitrate, generates the
+    crossfade ONCE, and pushes chunks to its Broadcast buffer. Exactly two of
+    these run for the whole station regardless of how many people are listening.
+    """
+    def __init__(self, broadcast: Broadcast, lo: bool, master: bool):
+        super().__init__(daemon=True)
+        self.broadcast = broadcast
+        self.lo        = lo
+        self.master    = master   # the hi encoder owns /now metadata
+        self.seq       = 0        # playlist cursor
+
+    def _next(self, _cur):
+        if station.is_mindfulness():
+            return MINDFULNESS
+        p = playlist.at(self.seq)
+        self.seq += 1
+        return p
+
+    def run(self):
+        path   = self._next(None)
+        offset = 0
+        if self.master:
+            station.note_now(path)
+
+        while True:
+            serve = lo_path(path) if (self.lo and path != MINDFULNESS) else path
+            dur, bitrate = ffprobe_info(serve)
+            bytes_sec = (bitrate or (128_000 if self.lo else 320_000)) / 8
+            cf_byte   = int((dur - CROSSFADE) * bytes_sec) if dur else os.path.getsize(serve)
+            deadline  = time.monotonic()
+            cf_bytes  = None
+            nxt       = None
+            emergency = False
+
+            try:
+                with open(serve, 'rb') as f:
+                    f.seek(offset)
+                    while True:
+                        pos   = f.tell()
+                        chunk = f.read(CHUNK)
+                        if not chunk:
+                            break
+
+                        # Emergency crossfade: mindfulness flipped on mid-track
+                        if serve != MINDFULNESS and station.is_mindfulness() and cf_bytes is None:
+                            pos_sec  = max(0.0, (pos - offset) / bytes_sec)
+                            cf_bytes = make_crossfade(
+                                serve, MINDFULNESS,
+                                bitrate_kbps=128 if self.lo else 320,
+                                offset_a_sec=pos_sec if dur and pos_sec < dur - CROSSFADE else None,
+                            )
+                            nxt       = MINDFULNESS
+                            emergency = True
+                            break
+
+                        # Normal crossfade at end of track
+                        if pos >= cf_byte and cf_bytes is None:
+                            nxt       = self._next(path)
+                            nxt_serve = lo_path(nxt) if (self.lo and nxt != MINDFULNESS) else nxt
+                            cf_bytes  = make_crossfade(
+                                serve, nxt_serve, bitrate_kbps=128 if self.lo else 320)
+                            chunk     = chunk[:max(0, cf_byte - pos)]
+                            if not chunk:
+                                break
+
+                        self.broadcast.push(chunk)
+                        # pace at real time so the buffer stays "live"
+                        deadline += len(chunk) / bytes_sec
+                        lag = deadline - time.monotonic()
+                        if lag > 0.005:
+                            time.sleep(lag)
+            except (FileNotFoundError, OSError) as e:
+                print(f'encoder {"lo" if self.lo else "hi"}: skip {serve}: {e}', flush=True)
+
+            if cf_bytes:
+                self.broadcast.push(cf_bytes)
+
+            path = nxt or self._next(path)
+            # after a real crossfade we already emitted the next track's first 4s
+            offset = int(CROSSFADE * bytes_sec) if (cf_bytes and not emergency) else 0
+            if self.master:
+                station.note_now(path)
 
 # ---------- POSIX signals ----------------------------------------------------
 
@@ -388,8 +481,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         elif path == '/cover':
-            snap = station.snapshot()
-            data = extract_cover(snap['path']) if snap['path'] and snap['path'] != MINDFULNESS else None
+            cur  = station.cur_path()
+            data = extract_cover(cur) if cur and cur != MINDFULNESS else None
             if data:
                 self.send_response(200)
                 mime = 'image/png' if data[:4] == b'\x89PNG' else 'image/jpeg'
@@ -411,6 +504,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def _serve(self, lo=False):
+        """A listener is now just a tap on the shared buffer — no work per client."""
         self.send_response(200)
         self.send_header('Content-Type', 'audio/mpeg')
         self.send_header('Cache-Control', 'no-cache, no-store')
@@ -419,83 +513,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('icy-name', 'Macka Station')
         self.end_headers()
 
+        bc = broadcast_lo if lo else broadcast_hi
         try:
-            snap       = station.snapshot()
-            hi_path    = snap['path']
-            serve_path = station.lo_serve_path(lo)
-            bitrate    = snap['bitrate']
-            dur        = snap['dur']
-            offset     = snap['offset']
-            cf_cache: dict = {}
-
-            while True:
-                bytes_sec = (bitrate or 320_000) / 8
-                burst_b   = int(BURST_SECS * bytes_sec)
-                cf_byte   = int((dur - CROSSFADE) * bytes_sec) if dur else os.path.getsize(serve_path)
-                sent      = 0
-                deadline  = time.monotonic()
-                cf_bytes  = None
-                nxt_hi    = None
-                emergency = False
-
-                with open(serve_path, 'rb') as f:
-                    f.seek(offset)
-                    while True:
-                        pos   = f.tell()
-                        chunk = f.read(CHUNK)
-                        if not chunk:
-                            break
-
-                        # Emergency crossfade: mindfulness activated mid-track
-                        if serve_path != MINDFULNESS and station.is_mindfulness() and cf_bytes is None:
-                            station.advance(hi_path)   # advance to mindfulness
-                            pos_sec   = max(0.0, (pos - offset) / bytes_sec)
-                            cf_bytes  = make_crossfade(
-                                serve_path, MINDFULNESS,
-                                bitrate_kbps=128 if lo else 320,
-                                offset_a_sec=pos_sec if dur and pos_sec < dur - CROSSFADE else None,
-                            )
-                            nxt_hi    = MINDFULNESS
-                            emergency = True
-                            chunk     = b''
-                            break
-
-                        # Crossfade at end of track: advance station first, then
-                        # snapshot gives us the NEW track as crossfade target
-                        if pos >= cf_byte and cf_bytes is None:
-                            station.advance(hi_path)   # ← advance before snapshot
-                            snap2   = station.snapshot()
-                            nxt_hi  = snap2['path']
-                            nxt_srv = station.lo_serve_path(lo)
-                            key     = (serve_path, nxt_srv)
-                            if key not in cf_cache:
-                                cf_cache[key] = make_crossfade(
-                                    serve_path, nxt_srv,
-                                    bitrate_kbps=128 if lo else 320,
-                                )
-                            cf_bytes = cf_cache[key]
-                            chunk    = chunk[:max(0, cf_byte - pos)]
-                            if not chunk:
-                                break
-
-                        if chunk:
-                            self.wfile.write(chunk)
-                            sent += len(chunk)
-                            if sent > burst_b:
-                                deadline += len(chunk) / bytes_sec
-                                lag = deadline - time.monotonic()
-                                if lag > 0.005:
-                                    time.sleep(lag)
-
-                if cf_bytes:
-                    self.wfile.write(cf_bytes)
-
-                # Track already advanced above; just update local vars
-                hi_path    = nxt_hi or station.snapshot()['path']
-                serve_path = station.lo_serve_path(lo)
-                dur, bitrate = ffprobe_info(serve_path)
-                offset     = int(CROSSFADE * (bitrate / 8)) if cf_bytes and not emergency else 0
-
+            for chunk in bc.stream():
+                self.wfile.write(chunk)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
@@ -505,11 +526,10 @@ class Server(ThreadingMixIn, HTTPServer):
 
 
 if __name__ == '__main__':
-    print('Macka Station v3  initialising…', flush=True)
+    print('Macka Station v4  initialising…', flush=True)
     init_db()
     sync_tracks()
     threading.Thread(target=enrich_tracks, daemon=True).start()
-    threading.Thread(target=station.run,   daemon=True).start()
 
     # Deploy trigger: start in mindfulness, fade to music after MINDFULNESS_SECS
     if os.path.exists(DEPLOY_TRIGGER):
@@ -517,8 +537,12 @@ if __name__ == '__main__':
         station.enter_mindfulness()
         print(f'Deploy start: mindfulness for {MINDFULNESS_SECS}s', flush=True)
 
+    # Two encoders for the whole station — hi is the metadata master
+    Encoder(broadcast_hi, lo=False, master=True).start()
+    Encoder(broadcast_lo, lo=True,  master=False).start()
+
     time.sleep(0.5)
     tracks_count = len([f for f in os.listdir(AUDIO_DIR)
                         if f.lower().endswith(('.mp3', '.flac'))])
-    print(f'Macka Station v3  port={PORT}  tracks={tracks_count}', flush=True)
+    print(f'Macka Station v4  port={PORT}  tracks={tracks_count}', flush=True)
     Server(('0.0.0.0', PORT), Handler).serve_forever()
