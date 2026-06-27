@@ -1,0 +1,30 @@
+{
+  "name": "mackafunk",
+  "version": "1.0.0",
+  "description": "Macka Station — web radio desktop app",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --mac"
+  },
+  "license": "ISC",
+  "build": {
+    "appId": "app.agtc.macka",
+    "productName": "Mackafunk",
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }]
+    },
+    "dmg": {
+      "title": "Mackafunk"
+    },
+    "files": ["main.js", "*.png", "*.icns", "node_modules/**/*"]
+  },
+  "devDependencies": {
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-auto-launch": "^5.0.7"
+  }
+}
