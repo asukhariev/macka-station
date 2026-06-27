@@ -2,21 +2,21 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Macka Funk',
-  description: 'macka funk radio',
+  title: 'Mackafunk',
+  description: 'Library, Jazz, Funk, Soul, Psychedelic, Rock, Disco, Boogie, Hip Hop, Dub, Cumbia music',
   icons: { icon: '/favicon.gif', shortcut: '/favicon.gif' },
   openGraph: {
-    title: 'Macka Funk',
-    description: 'macka funk radio',
+    title: 'Mackafunk',
+    description: 'Library, Jazz, Funk, Soul, Psychedelic, Rock, Disco, Boogie, Hip Hop, Dub, Cumbia music',
     url: 'https://macka.agtc.app',
-    siteName: 'Macka Funk',
+    siteName: 'Mackafunk',
     images: [{ url: 'https://macka.agtc.app/og.jpg', width: 1456, height: 816 }],
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Macka Funk',
-    description: 'macka funk radio',
+    title: 'Mackafunk',
+    description: 'Library, Jazz, Funk, Soul, Psychedelic, Rock, Disco, Boogie, Hip Hop, Dub, Cumbia music',
     images: ['https://macka.agtc.app/og.jpg'],
   },
 };
