@@ -289,6 +289,21 @@ export default function MackaPage() {
     }
   }, [setupAudio]);
 
+  // Spacebar toggles play/pause (ignored while a button/link/field is focused so
+  // it doesn't double-fire or hijack their own space handling).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' && e.key !== ' ') return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === 'BUTTON' || tag === 'A' || tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return;
+      e.preventDefault();
+      if (!e.repeat) toggle();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [toggle]);
+
   useEffect(() => {
     const el = document.createElement('audio');
     el.preload = 'none';
