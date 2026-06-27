@@ -270,7 +270,15 @@ export default function MackaPage() {
     el.crossOrigin = 'anonymous';
     playerRef.current = el;
 
-    el.addEventListener('playing', () => setStatus('live'));
+    // Keep the play/pause button in sync with the element's REAL state. Mobile
+    // browsers pause our audio when another app (YouTube, a call) takes audio
+    // focus — without this the button stayed on "pause" while silent, forcing a
+    // pause-then-play dance. Now an external pause flips the button to "play" so
+    // a single tap resumes (and toggle() reconnects fresh → jumps to live).
+    el.addEventListener('play',    () => setOn(true));
+    el.addEventListener('playing', () => { setOn(true); setStatus('live'); });
+    el.addEventListener('pause',   () => { if (el.src) setOn(false); });
+    el.addEventListener('ended',   () => setOn(false));
     el.addEventListener('stalled', () => setStatus('buffering...'));
     el.addEventListener('error', () => {
       if (!onRef.current) return;
