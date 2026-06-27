@@ -37,7 +37,7 @@ export default function MackaPage() {
   const lightRef = useRef(false);
   const isLoRef  = useRef(false);
 
-  const userPaused     = useRef(false);                              // true only when the user pressed pause
+  const userPaused     = useRef(true);                               // false only while the user wants audio (after pressing play)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTime       = useRef(0);                                  // for the liveness watchdog
 
@@ -252,16 +252,19 @@ export default function MackaPage() {
 
   // Re-attach to the live stream after the connection drops (deploy / network).
   // A process restart kills every open connection — the only way playback resumes
-  // without the user re-tapping play is for the client to reconnect itself. Fresh
-  // src → jumps straight to live. Keeps retrying until the new process answers.
+  // without re-tapping play is for the client to reconnect itself. Fresh src →
+  // jumps to live; also resume the AudioContext (it suspends when the tab is
+  // backgrounded — otherwise the element "plays" but stays silent → looks paused).
   const reconnect = useCallback((delay = 1200) => {
-    if (!onRef.current || userPaused.current) return;
+    if (userPaused.current) return;                // only when the user wants audio
     if (reconnectTimer.current) return;            // one attempt in flight
+    setOn(true);
     setStatus('reconnecting…');
     reconnectTimer.current = setTimeout(() => {
       reconnectTimer.current = null;
       const el = playerRef.current;
-      if (!el || !onRef.current || userPaused.current) return;
+      if (!el || userPaused.current) return;
+      if (audioCtx.current?.state === 'suspended') audioCtx.current.resume().catch(() => {});
       el.src = isLoRef.current ? STREAM_LO : STREAM_HI;
       el.load();
       el.play().catch(() => {});
@@ -269,22 +272,27 @@ export default function MackaPage() {
   }, []);
 
   const toggle = useCallback(() => {
-    if (!playerRef.current) return;
-    if (onRef.current) {
+    const el = playerRef.current;
+    if (!el) return;
+    // Only treat a tap as "pause" when audio is genuinely playing. If the button
+    // shows pause but the stream is actually stuck/silent (dropped, suspended),
+    // a single tap should RESTART it — never the old pause-then-play dance.
+    const reallyPlaying = !el.paused && !el.error && el.readyState >= 2;
+    if (onRef.current && reallyPlaying) {
       userPaused.current = true;
       if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
       setOn(false);
-      playerRef.current.pause();
-      playerRef.current.src = '';
-      playerRef.current.load();
+      el.pause();
+      el.src = '';
+      el.load();
     } else {
       userPaused.current = false;
       setOn(true);
       setupAudio();
-      if (audioCtx.current?.state === 'suspended') audioCtx.current.resume();
-      const url = isLoRef.current ? STREAM_LO : STREAM_HI;
-      playerRef.current.src = url;
-      playerRef.current.play().catch(() => {});
+      if (audioCtx.current?.state === 'suspended') audioCtx.current.resume().catch(() => {});
+      el.src = isLoRef.current ? STREAM_LO : STREAM_HI;
+      el.load();
+      el.play().catch(() => {});
       setStatus('connecting…');
     }
   }, [setupAudio]);
@@ -310,31 +318,18 @@ export default function MackaPage() {
     el.crossOrigin = 'anonymous';
     playerRef.current = el;
 
-    el.addEventListener('play',    () => setOn(true));
+    // The button reflects user INTENT (set by toggle), not the element's moment-
+    // to-moment state — so a deploy drop or an OS pause never leaves it lying.
     el.addEventListener('playing', () => {
-      setOn(true); setStatus('live');
+      setStatus('live');
       if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
     });
-    // 'ended' / 'error' = the stream connection dropped (deploy / network). While
-    // we still intend to play, reconnect ourselves so the listener never has to
-    // re-tap play. 'ended' first (fast), 'error' with a little more backoff.
-    el.addEventListener('ended',   () => { if (onRef.current && !userPaused.current) reconnect(700); });
-    el.addEventListener('error',   () => { if (onRef.current && !userPaused.current) reconnect(1500); });
-    el.addEventListener('stalled', () => { setStatus('buffering…'); if (onRef.current) reconnect(6000); });
-    el.addEventListener('waiting', () => { setStatus('buffering…'); if (onRef.current) reconnect(6000); });
-    // 'pause' fires both when the OS steals audio focus (YouTube, a call) AND can
-    // precede a dropped connection. Wait a beat to disambiguate: a drop will have
-    // errored/ended or armed a reconnect by then — leave that to the reconnect
-    // path. A genuine OS pause just flips the button to play (one tap resumes).
-    let pauseTimer: ReturnType<typeof setTimeout> | null = null;
-    el.addEventListener('pause', () => {
-      if (userPaused.current || !el.src) return;
-      if (pauseTimer) clearTimeout(pauseTimer);
-      pauseTimer = setTimeout(() => {
-        if (userPaused.current || el.error || el.ended || reconnectTimer.current) return;
-        if (el.paused) setOn(false);
-      }, 300);
-    });
+    // ended / error / stalled / waiting all mean "no audio is flowing". While the
+    // user still wants to listen, reconnect ourselves — no re-tap, ever.
+    el.addEventListener('ended',   () => { if (!userPaused.current) reconnect(700); });
+    el.addEventListener('error',   () => { if (!userPaused.current) reconnect(1500); });
+    el.addEventListener('stalled', () => { setStatus('buffering…'); if (!userPaused.current) reconnect(6000); });
+    el.addEventListener('waiting', () => { setStatus('buffering…'); if (!userPaused.current) reconnect(6000); });
 
     // start polling /now immediately — track name shows before pressing play
     pollNow();
@@ -353,11 +348,25 @@ export default function MackaPage() {
   useEffect(() => {
     const iv = setInterval(() => {
       const el = playerRef.current;
-      if (!el || !onRef.current || userPaused.current || el.paused) return;
-      if (el.currentTime === lastTime.current) reconnect(0);
+      if (!el || userPaused.current || el.paused) return;
+      if (el.currentTime === lastTime.current) reconnect(0);   // frozen while "playing" → re-attach
       lastTime.current = el.currentTime;
     }, 4000);
     return () => clearInterval(iv);
+  }, [reconnect]);
+
+  // Returning to the tab/app: if the user wants audio but it isn't actually
+  // flowing (backgrounding suspended the context or dropped the connection),
+  // wake the context and re-attach — so coming back resumes on its own.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState !== 'visible' || userPaused.current) return;
+      if (audioCtx.current?.state === 'suspended') audioCtx.current.resume().catch(() => {});
+      const el = playerRef.current;
+      if (!el || el.paused || el.readyState < 2) reconnect(0);
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
   }, [reconnect]);
 
   const infoTop = textBounds.bottom > 0
