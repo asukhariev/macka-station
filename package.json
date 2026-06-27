@@ -8,7 +8,7 @@
     "deploy": "next build && rsync -az --delete out/ root@46.224.219.172:/srv/macka/web/"
   },
   "dependencies": {
-    "next": "15.3.3",
+    "next": "16.2.9",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
