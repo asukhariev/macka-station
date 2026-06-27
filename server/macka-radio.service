@@ -1,0 +1,25 @@
+# Installed at /etc/systemd/system/macka-radio.service on the VPS.
+# After editing: scp to the VPS, `systemctl daemon-reload`, `systemctl restart macka-radio`.
+[Unit]
+Description=Macka Station Radio
+After=network.target postgresql.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=root
+WorkingDirectory=/srv/macka
+ExecStart=/usr/bin/python3 /srv/macka/radio.py
+Restart=always
+RestartSec=3
+# Self-healing: the encoder pings WATCHDOG=1 every ~5s. If it wedges (the bug
+# that drained listeners to silence) the pings stop and systemd auto-restarts
+# the service within 30s — verified by freezing the process with SIGSTOP.
+WatchdogSec=30
+Environment=DATABASE_URL=postgresql://macka:mackapass@localhost/macka
+Environment=AUDIO_DIR=/srv/macka/audio
+Environment=AUDIO_LO_DIR=/srv/macka/audio_lo
+Environment=PORT=8765
+
+[Install]
+WantedBy=multi-user.target

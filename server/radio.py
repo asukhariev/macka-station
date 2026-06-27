@@ -11,7 +11,7 @@ Macka Station Radio v4
 - 4s acrossfade between tracks
 - Zero-downtime deploys via SIGUSR1 → mindfulness interlude
 """
-import os, time, threading, subprocess, json, hashlib, signal, sys
+import os, time, threading, subprocess, json, hashlib, signal, sys, socket
 from collections import deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -29,6 +29,24 @@ DEPLOY_TRIGGER  = '/tmp/macka_deploy'
 
 import psycopg2
 import psycopg2.pool
+
+# ---------- systemd watchdog -------------------------------------------------
+# The master encoder pings WATCHDOG=1 while it's producing audio. If it ever
+# wedges (the failure that drained listeners to silence), the pings stop and
+# systemd auto-restarts the service — self-healing, no human in the loop.
+
+def _sd_notify(state: str):
+    addr = os.environ.get('NOTIFY_SOCKET')
+    if not addr:
+        return
+    if addr[0] == '@':
+        addr = '\0' + addr[1:]   # abstract namespace socket
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.connect(addr)
+            s.sendall(state.encode())
+    except OSError:
+        pass
 
 # ---------- database ---------------------------------------------------------
 
@@ -359,8 +377,9 @@ class Encoder(threading.Thread):
         super().__init__(daemon=True)
         self.broadcast = broadcast
         self.lo        = lo
-        self.master    = master   # the hi encoder owns /now metadata
+        self.master    = master   # the hi encoder owns /now metadata + watchdog
         self.seq       = 0        # playlist cursor
+        self._last_ping = 0.0     # systemd watchdog throttle
 
     def _next(self, _cur):
         if station.is_mindfulness():
@@ -429,6 +448,10 @@ class Encoder(threading.Thread):
                         # pace at real time so the buffer stays "live"
                         deadline += len(chunk) / bytes_sec
                         now = time.monotonic()
+                        # heartbeat: prove the encoder is still producing audio
+                        if self.master and now - self._last_ping > 5:
+                            _sd_notify('WATCHDOG=1')
+                            self._last_ping = now
                         lag = deadline - now
                         if lag > 0.005:
                             time.sleep(lag)
@@ -564,5 +587,6 @@ if __name__ == '__main__':
     time.sleep(0.5)
     tracks_count = len([f for f in os.listdir(AUDIO_DIR)
                         if f.lower().endswith(('.mp3', '.flac'))])
-    print(f'Macka Station v4  port={PORT}  tracks={tracks_count}', flush=True)
+    print(f'Macka Station v5  port={PORT}  tracks={tracks_count}', flush=True)
+    _sd_notify('READY=1')   # tell systemd we're up (Type=notify + watchdog)
     Server(('0.0.0.0', PORT), Handler).serve_forever()
