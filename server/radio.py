@@ -220,6 +220,8 @@ def make_crossfade(path_a, path_b, bitrate_kbps=320, offset_a_sec=None):
             ['ffmpeg', '-y'] + input_a +
             ['-t', str(CROSSFADE), '-i', path_b,
              '-filter_complex', f'[0][1]acrossfade=d={CROSSFADE}:c1=tri:c2=tri',
+             '-ar', '44100',   # force 44.1kHz so a stray 48k file can't change the
+                               # stream's sample rate mid-MP3 and break mobile decoders
              '-b:a', f'{bitrate_kbps}k', '-f', 'mp3', 'pipe:1'],
             capture_output=True, timeout=12
         )
