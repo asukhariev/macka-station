@@ -4,7 +4,7 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Macka Funk',
   description: 'macka funk radio',
-  icons: { icon: '/favicon.svg', shortcut: '/favicon.svg' },
+  icons: { icon: '/favicon.gif', shortcut: '/favicon.gif' },
   openGraph: {
     title: 'Macka Funk',
     description: 'macka funk radio',
