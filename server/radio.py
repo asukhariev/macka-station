@@ -421,7 +421,7 @@ class Encoder(threading.Thread):
 
     def run(self):
         path   = self._next(None)
-        offset = 0
+        skip_intro = False        # next track's first CROSSFADE s already went out in a crossfade
         self._announce(path)
         # ONE continuous pacing clock for the encoder's whole life — never reset
         # per track. A stall (crossfade/ffprobe) leaves the deadline in the past,
@@ -434,9 +434,13 @@ class Encoder(threading.Thread):
             dur, bitrate = ffprobe_info(serve)
             bytes_sec = (bitrate or (128_000 if self.lo else 320_000)) / 8
             cf_byte   = int((dur - CROSSFADE) * bytes_sec) if dur else os.path.getsize(serve)
+            # skip the intro a crossfade already played — computed with THIS track's
+            # own bitrate. Using the previous track's rate mis-seeks and replays/
+            # overlaps audio when bitrates differ (the transition stutter).
+            offset    = int(CROSSFADE * bytes_sec) if skip_intro else 0
+            skip_intro = False
             cf_bytes  = None
             nxt       = None
-            emergency = False
 
             try:
                 with open(serve, 'rb') as f:
@@ -457,7 +461,6 @@ class Encoder(threading.Thread):
                                 offset_a_sec=pos_sec if dur and pos_sec < dur - CROSSFADE else None,
                             )
                             nxt       = tr
-                            emergency = True
                             break
 
                         # Normal crossfade at end of track
@@ -491,11 +494,10 @@ class Encoder(threading.Thread):
 
             if cf_bytes:
                 self.broadcast.push(cf_bytes)
-                deadline += CROSSFADE   # the crossfade is ~CROSSFADE s of audio
+                deadline   += CROSSFADE     # the crossfade is ~CROSSFADE s of audio
+                skip_intro  = True          # next track's first CROSSFADE s already played in it
 
             path = nxt or self._next(path)
-            # after a real crossfade we already emitted the next track's first 4s
-            offset = int(CROSSFADE * bytes_sec) if (cf_bytes and not emergency) else 0
             self._announce(path)
 
 # ---------- POSIX signals ----------------------------------------------------
