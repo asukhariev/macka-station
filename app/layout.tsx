@@ -10,14 +10,14 @@ export const metadata: Metadata = {
     description: 'macka funk radio',
     url: 'https://macka.agtc.app',
     siteName: 'Macka Funk',
-    images: [{ url: 'https://macka.agtc.app/og.png', width: 1200, height: 630 }],
+    images: [{ url: 'https://macka.agtc.app/og.jpg', width: 1456, height: 816 }],
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
     title: 'Macka Funk',
     description: 'macka funk radio',
-    images: ['https://macka.agtc.app/og.png'],
+    images: ['https://macka.agtc.app/og.jpg'],
   },
 };
 
