@@ -1,0 +1,50 @@
+name: Deploy server
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'server/**'
+      - '.github/workflows/deploy-server.yml'
+
+jobs:
+  deploy-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enter mindfulness mode
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: macka.agtc.app
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            PID=$(systemctl show -p MainPID macka-radio --value 2>/dev/null || echo "")
+            if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+              kill -USR1 "$PID" && echo "→ mindfulness signal sent to PID $PID"
+            fi
+
+      - name: Deploy server files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: macka.agtc.app
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "server/"
+          target: "/srv/macka/"
+          strip_components: 1
+
+      - name: Restart with deploy trigger
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: macka.agtc.app
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            pip3 install -r /srv/macka/requirements.txt -q
+            touch /tmp/macka_deploy
+            systemctl restart macka-radio
+            sleep 3
+            systemctl is-active macka-radio
+            curl -sf https://macka.agtc.app/now && echo " ✓ /now ok"
