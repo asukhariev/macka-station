@@ -37,6 +37,10 @@ export default function MackaPage() {
   const lightRef = useRef(false);
   const isLoRef  = useRef(false);
 
+  const userPaused     = useRef(false);                              // true only when the user pressed pause
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTime       = useRef(0);                                  // for the liveness watchdog
+
   // canvas text bounds → used to position the play button and track info
   const textBoundsRef = useRef({ top: 0, bottom: 0, set: false });
   const [textBounds, setTextBounds] = useState({ top: 0, bottom: 0 });
@@ -246,23 +250,44 @@ export default function MackaPage() {
       .catch(() => {});
   }, []);
 
+  // Re-attach to the live stream after the connection drops (deploy / network).
+  // A process restart kills every open connection — the only way playback resumes
+  // without the user re-tapping play is for the client to reconnect itself. Fresh
+  // src → jumps straight to live. Keeps retrying until the new process answers.
+  const reconnect = useCallback((delay = 1200) => {
+    if (!onRef.current || userPaused.current) return;
+    if (reconnectTimer.current) return;            // one attempt in flight
+    setStatus('reconnecting…');
+    reconnectTimer.current = setTimeout(() => {
+      reconnectTimer.current = null;
+      const el = playerRef.current;
+      if (!el || !onRef.current || userPaused.current) return;
+      el.src = isLoRef.current ? STREAM_LO : STREAM_HI;
+      el.load();
+      el.play().catch(() => {});
+    }, delay);
+  }, []);
+
   const toggle = useCallback(() => {
     if (!playerRef.current) return;
     if (onRef.current) {
+      userPaused.current = true;
+      if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
       setOn(false);
       playerRef.current.pause();
       playerRef.current.src = '';
       playerRef.current.load();
     } else {
+      userPaused.current = false;
       setOn(true);
       setupAudio();
       if (audioCtx.current?.state === 'suspended') audioCtx.current.resume();
       const url = isLoRef.current ? STREAM_LO : STREAM_HI;
       playerRef.current.src = url;
       playerRef.current.play().catch(() => {});
-      setStatus('connecting...');
+      setStatus('connecting…');
     }
-  }, [setupAudio, pollNow]);
+  }, [setupAudio]);
 
   useEffect(() => {
     const el = document.createElement('audio');
@@ -270,26 +295,22 @@ export default function MackaPage() {
     el.crossOrigin = 'anonymous';
     playerRef.current = el;
 
-    // Keep the play/pause button in sync with the element's REAL state. Mobile
-    // browsers pause our audio when another app (YouTube, a call) takes audio
-    // focus — without this the button stayed on "pause" while silent, forcing a
-    // pause-then-play dance. Now an external pause flips the button to "play" so
-    // a single tap resumes (and toggle() reconnects fresh → jumps to live).
     el.addEventListener('play',    () => setOn(true));
-    el.addEventListener('playing', () => { setOn(true); setStatus('live'); });
-    el.addEventListener('pause',   () => { if (el.src) setOn(false); });
-    el.addEventListener('ended',   () => setOn(false));
-    el.addEventListener('stalled', () => setStatus('buffering...'));
-    el.addEventListener('error', () => {
-      if (!onRef.current) return;
-      setStatus('reconnecting...');
-      setTimeout(() => {
-        if (!onRef.current || !playerRef.current) return;
-        playerRef.current.src = isLoRef.current ? STREAM_LO : STREAM_HI;
-        playerRef.current.load();
-        playerRef.current.play().catch(() => {});
-      }, 2000);
+    el.addEventListener('playing', () => {
+      setOn(true); setStatus('live');
+      if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
     });
+    // 'ended' / 'error' = the stream connection dropped (deploy / network). While
+    // we still intend to play, reconnect ourselves so the listener never has to
+    // re-tap play. 'ended' first (fast), 'error' with a little more backoff.
+    el.addEventListener('ended',   () => { if (onRef.current && !userPaused.current) reconnect(700); });
+    el.addEventListener('error',   () => { if (onRef.current && !userPaused.current) reconnect(1500); });
+    el.addEventListener('stalled', () => { setStatus('buffering…'); if (onRef.current) reconnect(6000); });
+    el.addEventListener('waiting', () => { setStatus('buffering…'); if (onRef.current) reconnect(6000); });
+    // 'pause' fires when the OS/another app (YouTube, a call) steals audio focus.
+    // That's a genuine pause — reflect it on the button (one tap resumes); don't
+    // confuse it with a dropped connection, so we do NOT auto-reconnect here.
+    el.addEventListener('pause',   () => { if (!userPaused.current && el.src) setOn(false); });
 
     // start polling /now immediately — track name shows before pressing play
     pollNow();
@@ -300,6 +321,20 @@ export default function MackaPage() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [pollNow]);
+
+  // Liveness watchdog: if we think we're playing but currentTime stops advancing
+  // (and we're not OS-paused), the connection silently died — reconnect. Belt-and-
+  // suspenders behind the ended/error/stalled handlers for browsers that just go
+  // quiet without firing an event.
+  useEffect(() => {
+    const iv = setInterval(() => {
+      const el = playerRef.current;
+      if (!el || !onRef.current || userPaused.current || el.paused) return;
+      if (el.currentTime === lastTime.current) reconnect(0);
+      lastTime.current = el.currentTime;
+    }, 4000);
+    return () => clearInterval(iv);
+  }, [reconnect]);
 
   const infoTop = textBounds.bottom > 0
     ? Math.min(textBounds.bottom + 20, (typeof window !== 'undefined' ? window.innerHeight : 800) - 60)
