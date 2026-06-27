@@ -11,17 +11,18 @@ Macka Station Radio v4
 - 4s acrossfade between tracks
 - Zero-downtime deploys via SIGUSR1 → mindfulness interlude
 """
-import os, time, threading, subprocess, json, hashlib, signal, sys, socket
+import os, time, threading, subprocess, json, hashlib, signal, sys, socket, random
 from collections import deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 AUDIO_DIR       = os.getenv('AUDIO_DIR',       '/srv/macka/audio')
 AUDIO_LO_DIR    = os.getenv('AUDIO_LO_DIR',    '/srv/macka/audio_lo')
+TRANSITIONS_DIR = os.getenv('TRANSITIONS_DIR', '/srv/macka/sounds/transitions')
 MINDFULNESS     = os.getenv('MINDFULNESS',     '/srv/macka/sounds/mindfulness.mp3')
 DATABASE_URL    = os.getenv('DATABASE_URL',    'postgresql://macka:mackapass@localhost/macka')
 PORT            = int(os.getenv('PORT', 8765))
-MINDFULNESS_SECS = int(os.getenv('MINDFULNESS_SECS', '30'))
+MINDFULNESS_SECS = int(os.getenv('MINDFULNESS_SECS', '20'))
 CHUNK           = 32768
 BURST_SECS      = 8
 CROSSFADE       = 4.0
@@ -226,9 +227,30 @@ def make_crossfade(path_a, path_b, bitrate_kbps=320, offset_a_sec=None):
     except Exception:
         return None
 
+# ---------- intermission transitions -----------------------------------------
+# During any intermission (deploy / mindfulness) we play random lo-fi cuts from
+# the transitions pool, crossfading between them for as long as it lasts.
+
+def list_transitions():
+    try:
+        return [os.path.join(TRANSITIONS_DIR, f) for f in sorted(os.listdir(TRANSITIONS_DIR))
+                if f.lower().endswith(('.mp3', '.flac', '.ogg', '.m4a'))]
+    except OSError:
+        return []
+
+def random_transition(exclude=None):
+    pool = list_transitions()
+    if not pool:
+        return MINDFULNESS                       # legacy single-file fallback
+    choices = [p for p in pool if p != exclude] or pool
+    return random.choice(choices)
+
+def is_transition(path):
+    return bool(path) and (path == MINDFULNESS or path.startswith(TRANSITIONS_DIR))
+
 def lo_path(hi_path):
-    if hi_path == MINDFULNESS:
-        return hi_path
+    if is_transition(hi_path):
+        return hi_path                           # transitions have no lo variant
     name = os.path.basename(hi_path)
     lo   = os.path.join(AUDIO_LO_DIR, name)
     return lo if os.path.exists(lo) else hi_path
@@ -324,7 +346,7 @@ class Station:
         """Called (off-thread) by the master encoder when a new track starts.
         The ffprobe/ffmpeg probes run OUTSIDE the lock — otherwise they'd hold it
         for ~1.5s and stall the encoder's per-chunk is_mindfulness() check."""
-        if path == MINDFULNESS:
+        if is_transition(path):
             cur, cover = '· · ·', False
         else:
             title, artist = probe_tags(path)
@@ -335,7 +357,8 @@ class Station:
             self._cur_path = path
             self.current   = cur
             self.has_cover = cover
-        print(f'NOW  {cur}', flush=True)
+        label = f'{cur}  «{os.path.basename(path)}»' if is_transition(path) else cur
+        print(f'NOW  {label}', flush=True)
 
     def cur_path(self):
         with self._lock:
@@ -383,7 +406,7 @@ class Encoder(threading.Thread):
 
     def _next(self, _cur):
         if station.is_mindfulness():
-            return MINDFULNESS
+            return random_transition(exclude=_cur)   # random lo-fi cut, no repeat
         p = playlist.at(self.seq)
         self.seq += 1
         return p
@@ -405,7 +428,7 @@ class Encoder(threading.Thread):
         deadline = time.monotonic()
 
         while True:
-            serve = lo_path(path) if (self.lo and path != MINDFULNESS) else path
+            serve = lo_path(path) if (self.lo and not is_transition(path)) else path
             dur, bitrate = ffprobe_info(serve)
             bytes_sec = (bitrate or (128_000 if self.lo else 320_000)) / 8
             cf_byte   = int((dur - CROSSFADE) * bytes_sec) if dur else os.path.getsize(serve)
@@ -422,22 +445,23 @@ class Encoder(threading.Thread):
                         if not chunk:
                             break
 
-                        # Emergency crossfade: mindfulness flipped on mid-track
-                        if serve != MINDFULNESS and station.is_mindfulness() and cf_bytes is None:
+                        # Emergency crossfade: intermission flipped on mid-track
+                        if not is_transition(serve) and station.is_mindfulness() and cf_bytes is None:
+                            tr       = random_transition(exclude=serve)
                             pos_sec  = max(0.0, (pos - offset) / bytes_sec)
                             cf_bytes = make_crossfade(
-                                serve, MINDFULNESS,
+                                serve, tr,
                                 bitrate_kbps=128 if self.lo else 320,
                                 offset_a_sec=pos_sec if dur and pos_sec < dur - CROSSFADE else None,
                             )
-                            nxt       = MINDFULNESS
+                            nxt       = tr
                             emergency = True
                             break
 
                         # Normal crossfade at end of track
                         if pos >= cf_byte and cf_bytes is None:
                             nxt       = self._next(path)
-                            nxt_serve = lo_path(nxt) if (self.lo and nxt != MINDFULNESS) else nxt
+                            nxt_serve = lo_path(nxt) if (self.lo and not is_transition(nxt)) else nxt
                             cf_bytes  = make_crossfade(
                                 serve, nxt_serve, bitrate_kbps=128 if self.lo else 320)
                             chunk     = chunk[:max(0, cf_byte - pos)]
@@ -525,7 +549,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == '/cover':
             cur  = station.cur_path()
-            data = extract_cover(cur) if cur and cur != MINDFULNESS else None
+            data = extract_cover(cur) if cur and not is_transition(cur) else None
             if data:
                 self.send_response(200)
                 mime = 'image/png' if data[:4] == b'\x89PNG' else 'image/jpeg'
