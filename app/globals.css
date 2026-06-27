@@ -8,17 +8,30 @@ html, body {
   transition: background .4s;
 }
 
+
+@keyframes canvas-in {
+  from { opacity: 0; filter: blur(24px) brightness(0.4); }
+  to   { opacity: 1; filter: blur(0px)  brightness(1); }
+}
+
+@keyframes ui-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 canvas {
   position: fixed;
   inset: 0;
   width: 100%;
   height: 100%;
+  animation: canvas-in 1.4s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 #ui {
   position: fixed;
   inset: 0;
   pointer-events: none;
+  animation: ui-in 0.8s 0.9s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 /* top-right: quality + theme toggles */
@@ -27,37 +40,45 @@ canvas {
   top: 2.5rem;
   right: 3rem;
   display: flex;
-  gap: 1.5rem;
   align-items: center;
   pointer-events: all;
 }
 
-/* play — centered, above Macka Funk (top set via inline style from canvas bounds) */
-.play-btn {
+#top-left {
   position: absolute;
-  left: 50%;
-  top: 32%;
-  transform: translateX(-50%);
+  top: 2.5rem;
+  left: 3rem;
+  display: flex;
+  align-items: center;
   pointer-events: all;
-  font-size: 1rem;
-  letter-spacing: .3em;
 }
 
-/* track info — centered, below Macka Funk (top set via inline style) */
+/* play — centered at top */
+#play-btn {
+  position: absolute;
+  top: 2.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: all;
+}
+
+/* track — centered at bottom */
 #bottom-center {
   position: absolute;
+  bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px));
   left: 50%;
-  top: 68%;
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: .4rem;
+  pointer-events: none;
 }
 
 .ctrl-btn {
   font-family: 'Courier New', monospace;
   font-size: .9rem;
+  font-weight: 700;
   letter-spacing: .25em;
   text-transform: lowercase;
   background: none;
@@ -65,7 +86,7 @@ canvas {
   cursor: pointer;
   padding: 0;
   transition: color .3s;
-  color: #3a6fa8;
+  color: rgba(255,255,255,0.9);
 }
 .ctrl-btn:hover { color: #7ab4e8; }
 
@@ -86,28 +107,44 @@ body.light .theme-btn:hover { color: #2060b0; }
   margin-bottom: .2rem;
 }
 
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+#track-wrap {
+  max-width: 80vw;
+  overflow: hidden;
+}
+
 #track {
+  display: inline-block;
+  text-decoration: none;
+  font-weight: 700;
+  white-space: nowrap;
   font-family: 'Courier New', monospace;
   font-size: .8rem;
   letter-spacing: .12em;
-  color: #2a5080;
+  color: rgba(255,255,255,0.45);
   transition: color .5s;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 80vw;
-  text-align: center;
 }
-#track.live { color: #5090c0; }
+#track.marquee {
+  animation: marquee var(--marquee-dur, 12s) linear infinite;
+}
+#track .sep { display: inline-block; width: 3em; }
+#track.live {
+  color: rgba(255,255,255,0.9);
+  text-shadow: 0 0 20px rgba(168,212,248,0.4);
+}
 
-body.light #track      { color: #3070b0; }
-body.light #track.live { color: #1050a0; }
+body.light #track      { color: #2060b0; text-shadow: none; }
+body.light #track.live { color: #1040a0; text-shadow: none; }
 
 #status {
   font-family: 'Courier New', monospace;
   font-size: .65rem;
   letter-spacing: .2em;
-  color: #1a3050;
+  color: #3a6fa8;
   text-align: center;
 }
-body.light #status { color: #80a0c0; }
+body.light #status { color: #6090c0; }

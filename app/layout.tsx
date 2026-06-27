@@ -4,6 +4,7 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Macka Funk',
   description: 'macka funk radio',
+  icons: { icon: '/favicon.svg', shortcut: '/favicon.svg' },
 };
 
 export const viewport: Viewport = {

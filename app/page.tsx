@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 
-const STREAM_HI  = process.env.NEXT_PUBLIC_STREAM_URL    ?? '/stream';
-const STREAM_LO  = process.env.NEXT_PUBLIC_STREAM_LO_URL ?? '/stream-lo';
-const NOW_URL    = process.env.NEXT_PUBLIC_NOW_URL        ?? '/now';
-const COVER_URL  = process.env.NEXT_PUBLIC_COVER_URL     ?? NOW_URL.replace('/now', '/cover');
+const BASE       = 'https://macka.agtc.app';
+const STREAM_HI  = process.env.NEXT_PUBLIC_STREAM_URL    ?? `${BASE}/stream`;
+const STREAM_LO  = process.env.NEXT_PUBLIC_STREAM_LO_URL ?? `${BASE}/stream-lo`;
+const NOW_URL    = process.env.NEXT_PUBLIC_NOW_URL        ?? `${BASE}/now`;
+const COVER_URL  = process.env.NEXT_PUBLIC_COVER_URL      ?? `${BASE}/cover`;
 
 const T = {
   dark: {
@@ -25,7 +26,9 @@ export default function MackaPage() {
   const ofscr2     = useRef<HTMLCanvasElement | null>(null);
   const analyser   = useRef<AnalyserNode | null>(null);
   const dataFreq   = useRef<Uint8Array<ArrayBuffer> | null>(null);
-  const bassSmooth = useRef(0);
+  const bassSmooth   = useRef(0);
+  const beatDisplay  = useRef(0);
+  const ripplesRef   = useRef<{ x: number; y: number; t: number }[]>([]);
   const audioCtx   = useRef<AudioContext | null>(null);
   const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const frameRef   = useRef(0);
@@ -39,13 +42,27 @@ export default function MackaPage() {
   const [textBounds, setTextBounds] = useState({ top: 0, bottom: 0 });
 
   const [on,       setOn]       = useState(false);
-  const [isLight,  setIsLight]  = useState(false);
+  const [isLight,  setIsLight]  = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('macka-theme') === 'light';
+  });
   const [isLo,     setIsLo]     = useState(false);
   const [track,    setTrack]    = useState('—');
   const [status,   setStatus]   = useState('macka station');
   const [live,     setLive]     = useState(false);
   const [hasCover, setHasCover] = useState(false);
   const [coverKey, setCoverKey] = useState(0);
+  const trackRef = useRef<HTMLAnchorElement>(null);
+  const [isMarquee, setIsMarquee] = useState(false);
+  const [marqueeOffset, setMarqueeOffset] = useState('0px');
+
+  useLayoutEffect(() => {
+    const el = trackRef.current;
+    if (!el) return;
+    const overflow = el.scrollWidth - el.parentElement!.clientWidth;
+    setIsMarquee(overflow > 0);
+    setMarqueeOffset(overflow > 0 ? `-${overflow}px` : '0px');
+  }, [track]);
 
   useEffect(() => { isLoRef.current = isLo; }, [isLo]);
   useEffect(() => { onRef.current   = on;   }, [on]);
@@ -54,6 +71,7 @@ export default function MackaPage() {
     document.body.classList.toggle('light', isLight);
     const bg = T[isLight ? 'light' : 'dark'].bg;
     document.body.style.background = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+    localStorage.setItem('macka-theme', isLight ? 'light' : 'dark');
   }, [isLight]);
 
   // animation loop — runs once on mount
@@ -76,7 +94,8 @@ export default function MackaPage() {
       frameRef.current = requestAnimationFrame(drawFrame);
       const W = canvas!.width, H = canvas!.height;
       const cx = W / 2, cy = H / 2;
-      const R  = Math.min(W, H) * 0.28;
+      const R      = Math.min(W, H) * 0.28;
+      const mobile  = W < 640;
       const on      = onRef.current;
       const isLight = lightRef.current;
       const t = T[isLight ? 'light' : 'dark'];
@@ -108,9 +127,10 @@ export default function MackaPage() {
           ctx.beginPath();
           for (let x = 0; x <= W + step; x += step) {
             const xp = x / W;
-            const wy = Math.sin(now2 * 0.00022 + xp * 6    + prog * 5.5) * 6
-                     + Math.sin(now2 * 0.00055 + xp * 13.5 + prog * 9 + 2) * 3
-                     + bassSmooth.current * Math.sin(now2 * 0.00090 + xp * 22 + prog * 14) * 5;
+            const wm = mobile ? 0.4 : 1;
+            const wy = Math.sin(now2 * 0.00022 + xp * 6    + prog * 5.5) * 6 * wm
+                     + Math.sin(now2 * 0.00055 + xp * 13.5 + prog * 9 + 2) * 3 * wm
+                     + bassSmooth.current * Math.sin(now2 * 0.00090 + xp * 22 + prog * 14) * 5 * wm;
             x === 0 ? ctx.moveTo(x, y + wy) : ctx.lineTo(x, y + wy);
           }
           ctx.strokeStyle = `hsla(${hue},72%,${lum}%,${a})`;
@@ -119,8 +139,12 @@ export default function MackaPage() {
         }
       }
 
-      const beat  = on ? bassSmooth.current : 0;
-      const fsize = Math.min(W * 0.22, H * 0.28, 260);
+      const targetBeat = on ? bassSmooth.current : 0;
+      beatDisplay.current += (targetBeat - beatDisplay.current) * 0.025;
+      const beat = beatDisplay.current;
+      const fsize = mobile
+        ? Math.min(W * 0.38, H * 0.18, 180)
+        : Math.min(W * 0.22, H * 0.28, 260);
       const numBins = analyser.current ? dataFreq.current!.length : 128;
       const now   = performance.now();
       const lineH = 3, lineGap = 2;
@@ -176,11 +200,14 @@ export default function MackaPage() {
         const binIdx  = Math.min(Math.floor(prog * numBins * 0.85), numBins - 1);
         const freqVal = (analyser.current && dataFreq.current)
           ? dataFreq.current[binIdx] / 255 : 0;
-        const sway = Math.sin(now * 0.0005 + prog * Math.PI * 5) * 12;
-        const dx   = Math.round(sway + freqVal * 40 * beat);
+        const swayAmp = mobile ? 4 : 12;
+        const dispAmp = mobile ? 14 : 40;
+        const sway = Math.sin(now * 0.0005 + prog * Math.PI * 5) * swayAmp;
+        const dx   = Math.round(sway + freqVal * dispAmp * beat);
         ofx2.drawImage(ofscr1.current!, 0, y, W, lineH, dx, y, W, lineH);
       }
       ctx.drawImage(ofscr2.current!, 0, 0);
+
     }
 
     drawFrame();
@@ -226,11 +253,6 @@ export default function MackaPage() {
       playerRef.current.pause();
       playerRef.current.src = '';
       playerRef.current.load();
-      if (pollRef.current) clearInterval(pollRef.current);
-      setTrack('—');
-      setLive(false);
-      setHasCover(false);
-      setStatus('macka station');
     } else {
       setOn(true);
       setupAudio();
@@ -239,8 +261,6 @@ export default function MackaPage() {
       playerRef.current.src = url;
       playerRef.current.play().catch(() => {});
       setStatus('connecting...');
-      pollNow();
-      pollRef.current = setInterval(pollNow, 5000);
     }
   }, [setupAudio, pollNow]);
 
@@ -263,22 +283,27 @@ export default function MackaPage() {
       }, 2000);
     });
 
+    // start polling /now immediately — track name shows before pressing play
+    pollNow();
+    pollRef.current = setInterval(pollNow, 5000);
+
     return () => {
       el.pause();
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, []);
+  }, [pollNow]);
 
-  const btnTop  = textBounds.top    > 0 ? textBounds.top    - 52 : undefined;
-  const infoTop = textBounds.bottom > 0 ? textBounds.bottom + 24 : undefined;
+  const infoTop = textBounds.bottom > 0
+    ? Math.min(textBounds.bottom + 20, (typeof window !== 'undefined' ? window.innerHeight : 800) - 60)
+    : undefined;
 
   return (
     <>
       <canvas ref={canvasRef} />
       <div id="ui">
 
-        {/* top-right: quality + theme */}
-        <div id="top-right">
+        {/* top-left: quality */}
+        <div id="top-left">
           <button
             className="ctrl-btn"
             style={{ fontSize: '.7rem', letterSpacing: '.2em' }}
@@ -294,6 +319,10 @@ export default function MackaPage() {
           >
             {isLo ? 'lo' : 'hi'}
           </button>
+        </div>
+
+        {/* top-right: theme */}
+        <div id="top-right">
           <button
             className="ctrl-btn theme-btn"
             title="light / dark"
@@ -303,20 +332,34 @@ export default function MackaPage() {
           </button>
         </div>
 
-        {/* play — centered horizontally, above the Macka Funk text */}
-        <button
-          className="ctrl-btn play-btn"
-          style={btnTop !== undefined ? { top: btnTop } : {}}
-          onClick={toggle}
-        >
+        {/* invisible hit-area over the canvas text */}
+        {textBounds.bottom > 0 && (
+          <div
+            onClick={(e) => {
+              toggle();
+              ripplesRef.current.push({ x: e.clientX, y: e.clientY, t: performance.now() });
+            }}
+            style={{
+              position: 'absolute',
+              left: '10%', width: '80%',
+              top: textBounds.top,
+              height: textBounds.bottom - textBounds.top,
+              cursor: 'pointer',
+              pointerEvents: 'all',
+              outline: 'none',
+              WebkitTapHighlightColor: 'transparent',
+              userSelect: 'none',
+            }}
+          />
+        )}
+
+        {/* play — centered at top */}
+        <button id="play-btn" className="ctrl-btn" onClick={toggle}>
           {on ? 'pause' : 'play'}
         </button>
 
-        {/* track info — centered horizontally, below the Macka Funk text */}
-        <div
-          id="bottom-center"
-          style={infoTop !== undefined ? { top: infoTop } : {}}
-        >
+        {/* track info — centered at bottom */}
+        <div id="bottom-center">
           {hasCover && (
             <img
               key={coverKey}
@@ -325,8 +368,21 @@ export default function MackaPage() {
               id="cover-art"
             />
           )}
-          <div id="track" className={live ? 'live' : ''}>{track}</div>
-          <div id="status">{status}</div>
+          {track && track !== '—' && (
+            <div id="track-wrap">
+              <a
+                ref={trackRef}
+                id="track"
+                className={[live ? 'live' : '', isMarquee ? 'marquee' : ''].join(' ').trim()}
+                href={`https://music.youtube.com/search?q=${encodeURIComponent(track)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ pointerEvents: 'all', '--marquee-dur': `${Math.max(8, track.length * 0.22)}s` } as React.CSSProperties}
+              >
+                {isMarquee ? <><span>{track}</span><span className="sep"/><span>{track}</span><span className="sep"/></> : track}
+              </a>
+            </div>
+          )}
         </div>
 
       </div>
