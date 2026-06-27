@@ -1,18 +1,63 @@
-name: Deploy radio server
+name: Deploy
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'server/**'
+    branches: [master]
 
 jobs:
-  deploy:
+  deploy-frontend:
     runs-on: ubuntu-latest
+    if: >
+      contains(toJson(github.event.commits), '"app/') ||
+      contains(toJson(github.event.commits), '"public/') ||
+      contains(toJson(github.event.commits), 'package.json') ||
+      contains(toJson(github.event.commits), 'next.config')
     steps:
       - uses: actions/checkout@v4
 
-      # 1. Signal running radio to enter mindfulness — stream stays up
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build static export
+        run: pnpm build
+
+      - name: Deploy to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: macka.agtc.app
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "out/"
+          target: "/srv/macka/web-new"
+          strip_components: 1
+
+      - name: Swap web root
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: macka.agtc.app
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            rm -rf /srv/macka/web-old
+            mv /srv/macka/web /srv/macka/web-old 2>/dev/null || true
+            mv /srv/macka/web-new /srv/macka/web
+            curl -sf https://macka.agtc.app/ | grep -q "Macka" && echo "✓ frontend ok" || echo "⚠ check frontend"
+
+  deploy-server:
+    runs-on: ubuntu-latest
+    if: contains(toJson(github.event.commits), '"server/')
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Enter mindfulness mode
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -25,7 +70,6 @@ jobs:
               kill -USR1 "$PID" && echo "→ mindfulness signal sent to PID $PID"
             fi
 
-      # 2. Copy new server files while mindfulness is playing
       - name: Deploy server files
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -36,8 +80,6 @@ jobs:
           target: "/srv/macka/"
           strip_components: 1
 
-      # 3. Touch deploy trigger + restart — new process starts in mindfulness,
-      #    crossfades back to music after MINDFULNESS_SECS automatically
       - name: Restart with deploy trigger
         uses: appleboy/ssh-action@v1.0.3
         with:
