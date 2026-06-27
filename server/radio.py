@@ -202,7 +202,7 @@ def make_crossfade(path_a, path_b, bitrate_kbps=320, offset_a_sec=None):
             ['-t', str(CROSSFADE), '-i', path_b,
              '-filter_complex', f'[0][1]acrossfade=d={CROSSFADE}:c1=tri:c2=tri',
              '-b:a', f'{bitrate_kbps}k', '-f', 'mp3', 'pipe:1'],
-            capture_output=True, timeout=30
+            capture_output=True, timeout=12
         )
         return r.stdout if len(r.stdout) > 2000 else None
     except Exception:
@@ -284,9 +284,11 @@ class Broadcast:
             for c in new:
                 yield c
 
-# ~8s of burst backlog per bitrate (chunks = bitrate / CHUNK)
-broadcast_hi = Broadcast(burst_chunks=12)
-broadcast_lo = Broadcast(burst_chunks=6)
+# ~20s of burst backlog per bitrate (chunks = bitrate / CHUNK) — generous cushion
+# so a slow boundary crossfade can't drain a listener to silence before the
+# continuous deadline flushes the catch-up and refills it
+broadcast_hi = Broadcast(burst_chunks=24)
+broadcast_lo = Broadcast(burst_chunks=12)
 
 # ---------- station metadata + mindfulness -----------------------------------
 
@@ -301,18 +303,21 @@ class Station:
         self._mindfulness_until = 0.0
 
     def note_now(self, path: str):
-        """Called by the master (hi) encoder when a new track starts playing."""
+        """Called (off-thread) by the master encoder when a new track starts.
+        The ffprobe/ffmpeg probes run OUTSIDE the lock — otherwise they'd hold it
+        for ~1.5s and stall the encoder's per-chunk is_mindfulness() check."""
+        if path == MINDFULNESS:
+            cur, cover = '· · ·', False
+        else:
+            title, artist = probe_tags(path)
+            cur = (f'{artist} – {title}' if artist and title
+                   else (title or os.path.splitext(os.path.basename(path))[0]))
+            cover = bool(extract_cover(path))
         with self._lock:
             self._cur_path = path
-            if path == MINDFULNESS:
-                self.current   = '· · ·'
-                self.has_cover = False
-            else:
-                title, artist = probe_tags(path)
-                self.current = (f'{artist} – {title}' if artist and title
-                                else (title or os.path.splitext(os.path.basename(path))[0]))
-                self.has_cover = bool(extract_cover(path))
-        print(f'NOW  {self.current}', flush=True)
+            self.current   = cur
+            self.has_cover = cover
+        print(f'NOW  {cur}', flush=True)
 
     def cur_path(self):
         with self._lock:
@@ -364,18 +369,27 @@ class Encoder(threading.Thread):
         self.seq += 1
         return p
 
+    def _announce(self, path):
+        """Update /now metadata off the hot path — probe_tags/extract_cover spawn
+        ffprobe/ffmpeg and must never stall the chunk pump."""
+        if self.master:
+            threading.Thread(target=station.note_now, args=(path,), daemon=True).start()
+
     def run(self):
         path   = self._next(None)
         offset = 0
-        if self.master:
-            station.note_now(path)
+        self._announce(path)
+        # ONE continuous pacing clock for the encoder's whole life — never reset
+        # per track. A stall (crossfade/ffprobe) leaves the deadline in the past,
+        # so the next chunks flush back-to-back and refill every listener's buffer
+        # instead of all of them slowly draining to silence at each boundary.
+        deadline = time.monotonic()
 
         while True:
             serve = lo_path(path) if (self.lo and path != MINDFULNESS) else path
             dur, bitrate = ffprobe_info(serve)
             bytes_sec = (bitrate or (128_000 if self.lo else 320_000)) / 8
             cf_byte   = int((dur - CROSSFADE) * bytes_sec) if dur else os.path.getsize(serve)
-            deadline  = time.monotonic()
             cf_bytes  = None
             nxt       = None
             emergency = False
@@ -414,20 +428,26 @@ class Encoder(threading.Thread):
                         self.broadcast.push(chunk)
                         # pace at real time so the buffer stays "live"
                         deadline += len(chunk) / bytes_sec
-                        lag = deadline - time.monotonic()
+                        now = time.monotonic()
+                        lag = deadline - now
                         if lag > 0.005:
                             time.sleep(lag)
+                        elif lag < -BURST_SECS:
+                            # fell too far behind (e.g. a slow crossfade) — flush at
+                            # most BURST_SECS fast to refill buffers, then resync so
+                            # we never dump more than the buffer can hold at once
+                            deadline = now - BURST_SECS
             except (FileNotFoundError, OSError) as e:
                 print(f'encoder {"lo" if self.lo else "hi"}: skip {serve}: {e}', flush=True)
 
             if cf_bytes:
                 self.broadcast.push(cf_bytes)
+                deadline += CROSSFADE   # the crossfade is ~CROSSFADE s of audio
 
             path = nxt or self._next(path)
             # after a real crossfade we already emitted the next track's first 4s
             offset = int(CROSSFADE * bytes_sec) if (cf_bytes and not emergency) else 0
-            if self.master:
-                station.note_now(path)
+            self._announce(path)
 
 # ---------- POSIX signals ----------------------------------------------------
 
