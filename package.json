@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 51081",
-    "build": "next build",
+    "build": "node scripts/generate-og.mjs && next build",
     "deploy": "next build && rsync -az --delete out/ root@46.224.219.172:/srv/macka/web/"
   },
   "dependencies": {
@@ -13,9 +13,13 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "canvas": "^3.2.3",
+    "satori": "^0.26.0",
+    "sharp": "^0.35.2",
     "typescript": "^5"
   }
 }
