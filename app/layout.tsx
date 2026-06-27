@@ -5,7 +5,11 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Mackafunk',
   description: 'Library, Jazz, Funk, Soul, Psychedelic, Rock, Disco, Boogie, Hip Hop, Dub, Cumbia music',
-  icons: { icon: '/favicon.gif', shortcut: '/favicon.gif' },
+  icons: {
+    icon: '/favicon.png',
+    shortcut: '/favicon.png',
+    apple: '/apple-touch-icon.png',
+  },
   openGraph: {
     title: 'Mackafunk',
     description: 'Library, Jazz, Funk, Soul, Psychedelic, Rock, Disco, Boogie, Hip Hop, Dub, Cumbia music',
