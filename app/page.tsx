@@ -307,10 +307,19 @@ export default function MackaPage() {
     el.addEventListener('error',   () => { if (onRef.current && !userPaused.current) reconnect(1500); });
     el.addEventListener('stalled', () => { setStatus('buffering…'); if (onRef.current) reconnect(6000); });
     el.addEventListener('waiting', () => { setStatus('buffering…'); if (onRef.current) reconnect(6000); });
-    // 'pause' fires when the OS/another app (YouTube, a call) steals audio focus.
-    // That's a genuine pause — reflect it on the button (one tap resumes); don't
-    // confuse it with a dropped connection, so we do NOT auto-reconnect here.
-    el.addEventListener('pause',   () => { if (!userPaused.current && el.src) setOn(false); });
+    // 'pause' fires both when the OS steals audio focus (YouTube, a call) AND can
+    // precede a dropped connection. Wait a beat to disambiguate: a drop will have
+    // errored/ended or armed a reconnect by then — leave that to the reconnect
+    // path. A genuine OS pause just flips the button to play (one tap resumes).
+    let pauseTimer: ReturnType<typeof setTimeout> | null = null;
+    el.addEventListener('pause', () => {
+      if (userPaused.current || !el.src) return;
+      if (pauseTimer) clearTimeout(pauseTimer);
+      pauseTimer = setTimeout(() => {
+        if (userPaused.current || el.error || el.ended || reconnectTimer.current) return;
+        if (el.paused) setOn(false);
+      }, 300);
+    });
 
     // start polling /now immediately — track name shows before pressing play
     pollNow();
