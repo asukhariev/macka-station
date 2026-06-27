@@ -1,17 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- background -->
   <rect width="32" height="32" rx="6" fill="#03070f"/>
   <g>
     <animateTransform attributeName="transform" type="rotate"
-      from="0 16 16" to="360 16 16" dur="4s" repeatCount="indefinite"/>
-    <!-- record body -->
-    <circle cx="16" cy="16" r="13" fill="#2a5fc8"/>
+      from="0 16 16" to="360 16 16" dur="3s" repeatCount="indefinite"/>
+    <!-- outer vinyl -->
+    <circle cx="16" cy="16" r="14" fill="#0e0e18"/>
     <!-- grooves -->
-    <circle cx="16" cy="16" r="11" fill="none" stroke="#3a6fa8" stroke-width="0.6" opacity="0.5"/>
-    <circle cx="16" cy="16" r="9"  fill="none" stroke="#3a6fa8" stroke-width="0.6" opacity="0.5"/>
-    <circle cx="16" cy="16" r="7"  fill="none" stroke="#3a6fa8" stroke-width="0.6" opacity="0.5"/>
+    <circle cx="16" cy="16" r="13.2" fill="none" stroke="#252535" stroke-width="0.7"/>
+    <circle cx="16" cy="16" r="11.8" fill="none" stroke="#1e1e2e" stroke-width="0.6"/>
+    <circle cx="16" cy="16" r="10.4" fill="none" stroke="#252535" stroke-width="0.6"/>
+    <circle cx="16" cy="16" r="9"    fill="none" stroke="#1e1e2e" stroke-width="0.6"/>
+    <circle cx="16" cy="16" r="7.6"  fill="none" stroke="#252535" stroke-width="0.5"/>
     <!-- label -->
-    <circle cx="16" cy="16" r="4.5" fill="#eef5ff"/>
+    <circle cx="16" cy="16" r="5.5" fill="#03070f"/>
+    <circle cx="16" cy="16" r="5.5" fill="none" stroke="#4a7ed4" stroke-width="1" opacity="0.8"/>
+    <circle cx="16" cy="16" r="3.8" fill="none" stroke="#6eaaee" stroke-width="0.4" opacity="0.5"/>
     <!-- center hole -->
-    <circle cx="16" cy="16" r="1.2" fill="#2a5fc8"/>
+    <circle cx="16" cy="16" r="1.1" fill="#0e0e18"/>
+    <!-- shine highlight -->
+    <ellipse cx="11" cy="10" rx="2.5" ry="1" fill="white" opacity="0.06" transform="rotate(-40 11 10)"/>
   </g>
 </svg>
