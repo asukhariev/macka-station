@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from 'next';
+import Script from 'next/script';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -29,7 +30,16 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="uk">
-      <body>{children}</body>
+      <body>
+        {children}
+        <Script
+          defer
+          src="https://a.agtc.app/script.js"
+          data-website-id="2ed6bf8e-1312-4fb5-ad9d-b74cc5c97744"
+          data-domains="macka.agtc.app"
+          strategy="afterInteractive"
+        />
+      </body>
     </html>
   );
 }
