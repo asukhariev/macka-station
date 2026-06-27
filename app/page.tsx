@@ -56,6 +56,7 @@ export default function MackaPage() {
   const [live,     setLive]     = useState(false);
   const [hasCover, setHasCover] = useState(false);
   const [coverKey, setCoverKey] = useState(0);
+  const [mindful,  setMindful]  = useState(false);
   const trackRef = useRef<HTMLAnchorElement>(null);
   const [isMarquee, setIsMarquee] = useState(false);
   const [marqueeOffset, setMarqueeOffset] = useState('0px');
@@ -238,13 +239,14 @@ export default function MackaPage() {
   const pollNow = useCallback(() => {
     fetch(NOW_URL)
       .then(r => r.json())
-      .then((d: { track?: string; has_cover?: boolean }) => {
+      .then((d: { track?: string; has_cover?: boolean; mindful?: boolean }) => {
         const newTrack = d.track ?? '—';
         setTrack(prev => {
           if (prev !== newTrack) setCoverKey(k => k + 1);
           return newTrack;
         });
         setHasCover(!!d.has_cover);
+        setMindful(!!d.mindful);
         setLive(true);
       })
       .catch(() => {});
@@ -436,7 +438,7 @@ export default function MackaPage() {
 
         {/* track info — centered at bottom */}
         <div id="bottom-center">
-          {hasCover && (
+          {hasCover && !mindful && (
             <img
               key={coverKey}
               src={`${COVER_URL}?t=${coverKey}`}
@@ -444,7 +446,11 @@ export default function MackaPage() {
               id="cover-art"
             />
           )}
-          {track && track !== '—' && (
+          {mindful ? (
+            <div id="track-wrap">
+              <span id="track" className="intermission">{track}</span>
+            </div>
+          ) : track && track !== '—' && (
             <div id="track-wrap">
               <a
                 ref={trackRef}

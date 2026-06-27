@@ -27,6 +27,7 @@ CHUNK           = 32768
 BURST_SECS      = 8
 CROSSFADE       = 4.0
 DEPLOY_TRIGGER  = '/tmp/macka_deploy'
+INTERMISSION    = 'Back on air shortly'   # shown as /now track during an intermission
 
 import psycopg2
 import psycopg2.pool
@@ -349,7 +350,7 @@ class Station:
         The ffprobe/ffmpeg probes run OUTSIDE the lock — otherwise they'd hold it
         for ~1.5s and stall the encoder's per-chunk is_mindfulness() check."""
         if is_transition(path):
-            cur, cover = '· · ·', False
+            cur, cover = INTERMISSION, False
         else:
             title, artist = probe_tags(path)
             cur = (f'{artist} – {title}' if artist and title
@@ -539,7 +540,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/now':
             is_m = station.is_mindfulness()
             body = json.dumps({
-                'track':     '· · ·' if is_m else station.current,
+                'track':     INTERMISSION if is_m else station.current,
                 'has_cover': False if is_m else station.has_cover,
                 'mindful':   is_m,
             }).encode()

@@ -136,6 +136,11 @@ body.light .theme-btn:hover { color: #2060b0; }
   color: rgba(255,255,255,0.9);
   text-shadow: 0 0 20px rgba(168,212,248,0.4);
 }
+#track.intermission {
+  font-style: italic;
+  opacity: .7;
+  cursor: default;
+}
 
 body.light #track      { color: #2060b0; text-shadow: none; }
 body.light #track.live { color: #1040a0; text-shadow: none; }
